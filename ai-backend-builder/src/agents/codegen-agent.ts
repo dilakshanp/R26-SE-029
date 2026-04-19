@@ -1,0 +1,245 @@
+/**
+ * AI Backend Builder — Code Generator Agent
+ * 
+ * Generates production-ready source code for individual files
+ * based on file descriptions and full project context.
+ * 
+ * Input:  FileSpec + CodeGenContext
+ * Output: GeneratedFile with clean source code
+ */
+
+import { BaseAgent } from './base-agent.js';
+import { AIClient } from '../services/ai-client.js';
+import { Memory } from '../state/memory.js';
+import { Logger } from '../utils/logger.js';
+import type { FileSpec, GeneratedFile, CodeGenContext } from '../types/index.js';
+import {
+  CODEGEN_SYSTEM_PROMPT,
+  buildCodeGenPrompt,
+} from '../prompts/codegen-prompt.js';
+
+export class CodeGenAgent extends BaseAgent {
+  constructor(aiClient: AIClient, memory: Memory, logger: Logger) {
+    super('CodeGen', aiClient, memory, logger);
+  }
+
+  /**
+   * Generate source code for a single file.
+   * 
+   * @param input - Object containing { fileSpec, context, existingContent? }
+   * @returns GeneratedFile with the produced code
+   */
+  public async execute(input: unknown): Promise<GeneratedFile> {
+    const {
+      fileSpec,
+      context,
+      existingContent,
+    } = input as {
+      fileSpec: FileSpec;
+      context: CodeGenContext;
+      existingContent?: string;
+    };
+
+    this.log(`Generating: ${fileSpec.path}`);
+
+    try {
+      // Handle special files that don't need AI generation
+      if (fileSpec.path === '.env') {
+        return this.generateEnvFile(fileSpec, context);
+      }
+
+      if (fileSpec.path === 'package.json') {
+        return this.generatePackageJson(fileSpec, context);
+      }
+
+      // Build the prompt with full project context
+      const prompt = buildCodeGenPrompt(
+        fileSpec,
+        context.projectName,
+        context.entities,
+        context.features,
+        context.allFiles,
+        context.existingFileContents,
+        existingContent
+      );
+
+      // Query the AI
+      const rawResponse = await this.aiClient.query(
+        'codegen',
+        prompt,
+        CODEGEN_SYSTEM_PROMPT
+      );
+
+      // Extract clean code from the response
+      const code = this.extractCode(rawResponse);
+
+      if (!code || code.trim().length < 10) {
+        throw new Error(`Generated code is too short (${code.length} chars)`);
+      }
+
+      // Validate code quality
+      this.validateCode(fileSpec.path, code);
+
+      // Store in memory
+      this.memory.addGeneratedFile(fileSpec.path, code, 'generated');
+
+      this.log(`✓ Generated: ${fileSpec.path} (${code.length} chars)`);
+      this.logger.debug(
+        `First line: ${code.split('\n')[0]}`,
+        this.agentName
+      );
+
+      return {
+        path: fileSpec.path,
+        content: code,
+        status: 'generated',
+      };
+    } catch (error: unknown) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.logError(`✗ Failed to generate ${fileSpec.path}: ${errorMsg}`);
+
+      this.memory.addGeneratedFile(fileSpec.path, '', 'error');
+      this.memory.updateFileStatus(fileSpec.path, 'error', errorMsg);
+
+      return {
+        path: fileSpec.path,
+        content: '',
+        status: 'error',
+        errorMessage: errorMsg,
+      };
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Special File Generators
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Generate a .env file without AI (deterministic).
+   */
+  private generateEnvFile(
+    fileSpec: FileSpec,
+    context: CodeGenContext
+  ): GeneratedFile {
+    const dbName = context.projectName.replace(/[^a-z0-9]/gi, '-').toLowerCase();
+    const hasAuth = context.features.some(
+      (f) => f.name.toLowerCase().includes('auth')
+    );
+
+    const lines = [
+      `# ${context.projectName} Environment Variables`,
+      `PORT=3000`,
+      `MONGODB_URI=mongodb://localhost:27017/${dbName}`,
+      `NODE_ENV=development`,
+    ];
+
+    if (hasAuth) {
+      lines.push(`JWT_SECRET=your_jwt_secret_key_change_in_production`);
+      lines.push(`JWT_EXPIRE=7d`);
+    }
+
+    lines.push('');
+
+    const content = lines.join('\n');
+    this.memory.addGeneratedFile(fileSpec.path, content, 'generated');
+
+    this.log(`✓ Generated: ${fileSpec.path} (env file — deterministic)`);
+    return { path: fileSpec.path, content, status: 'generated' };
+  }
+
+  /**
+   * Generate package.json without AI (deterministic + reliable).
+   * AI-generated package.json often has syntax issues.
+   */
+  private generatePackageJson(
+    fileSpec: FileSpec,
+    context: CodeGenContext
+  ): GeneratedFile {
+    const hasAuth = context.features.some(
+      (f) => f.name.toLowerCase().includes('auth')
+    );
+    const hasValidation = context.features.some(
+      (f) => f.name.toLowerCase().includes('valid')
+    );
+
+    const pkg: Record<string, unknown> = {
+      name: context.projectName,
+      version: '1.0.0',
+      description: `${context.projectName} — Generated by AI Backend Builder`,
+      type: 'module',
+      main: 'app.js',
+      scripts: {
+        start: 'node app.js',
+        dev: 'node --watch app.js',
+      },
+      dependencies: {
+        express: '^4.18.2',
+        mongoose: '^8.0.0',
+        dotenv: '^16.3.1',
+        cors: '^2.8.5',
+      },
+    };
+
+    // Add optional dependencies based on features
+    const deps = pkg.dependencies as Record<string, string>;
+    if (hasAuth) {
+      deps['bcryptjs'] = '^2.4.3';
+      deps['jsonwebtoken'] = '^9.0.2';
+    }
+    if (hasValidation) {
+      deps['express-validator'] = '^7.0.1';
+    }
+
+    const content = JSON.stringify(pkg, null, 2) + '\n';
+    this.memory.addGeneratedFile(fileSpec.path, content, 'generated');
+
+    this.log(`✓ Generated: ${fileSpec.path} (package.json — deterministic)`);
+    return { path: fileSpec.path, content, status: 'generated' };
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Code Validation
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Basic validation of generated code quality.
+   * Checks for common AI mistakes.
+   */
+  private validateCode(path: string, code: string): void {
+    const warnings: string[] = [];
+
+    // Check for mixed module systems (common AI mistake)
+    if (code.includes('require(') && code.includes('import ')) {
+      warnings.push('Mixed require() and import statements detected');
+    }
+
+    // Check for require() when we need ES modules
+    if (code.includes('require(') && !code.includes('import ')) {
+      warnings.push('Using require() instead of ES module imports');
+    }
+
+    // Check for module.exports when we need ES modules
+    if (code.includes('module.exports')) {
+      warnings.push('Using module.exports instead of ES module exports');
+    }
+
+    // Check for placeholder comments
+    if (code.includes('// TODO') || code.includes('/* TODO')) {
+      warnings.push('Contains TODO placeholders');
+    }
+
+    // Check that .js extensions are used in import paths for local modules
+    const importRegex = /from\s+['"](\.\/.+?)['"]/g;
+    let match;
+    while ((match = importRegex.exec(code)) !== null) {
+      if (!match[1].endsWith('.js') && !match[1].endsWith('.json')) {
+        warnings.push(`Import "${match[1]}" missing .js extension`);
+      }
+    }
+
+    // Log warnings but don't block generation
+    for (const warning of warnings) {
+      this.logWarn(`${path}: ${warning}`);
+    }
+  }
+}
