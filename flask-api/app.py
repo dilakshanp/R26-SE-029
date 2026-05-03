@@ -21,9 +21,12 @@ import os
 import json
 import time
 import requests
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response
 from flask_cors import CORS
 from dotenv import load_dotenv
+
+from schema import BuildRequest
+from agents.orchestrator_agent import OrchestratorAgent
 
 load_dotenv()
 
@@ -189,6 +192,51 @@ def generate():
     except requests.exceptions.RequestException as e:
         app.logger.error(f"Ollama request failed: {str(e)}")
         return jsonify({"error": f"Request failed: {str(e)}"}), 500
+
+
+@app.route("/api/build", methods=["POST"])
+def build_project():
+    """
+    Start the autonomous backend build process.
+    Expected JSON body:
+    {
+        "prompt": "user requirement",
+        "workspace_uri": "/path/to/workspace"
+    }
+    Returns Server-Sent Events (SSE) stream.
+    """
+    if not request.is_json:
+        return jsonify({"error": "Request must be JSON"}), 400
+
+    data = request.get_json()
+    prompt = data.get("prompt")
+    workspace_uri = data.get("workspace_uri")
+
+    if not prompt or not workspace_uri:
+        return jsonify({"error": "Missing 'prompt' or 'workspace_uri'"}), 400
+
+    build_req = BuildRequest(
+        prompt=prompt,
+        workspace_uri=workspace_uri,
+        planner_model=DEFAULT_MODELS["planner"],
+        codegen_model=DEFAULT_MODELS["codegen"],
+        debug_model=DEFAULT_MODELS["debug"]
+    )
+
+    orchestrator = OrchestratorAgent(
+        ollama_url=OLLAMA_URL,
+        models=DEFAULT_MODELS,
+        max_retries=int(os.getenv("MAX_RETRIES", "3"))
+    )
+
+    return Response(
+        orchestrator.execute_stream(build_req),
+        mimetype="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive"
+        }
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

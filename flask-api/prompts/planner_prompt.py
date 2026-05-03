@@ -1,15 +1,11 @@
-/**
- * AI Backend Builder — Planner Agent Prompt Templates
- * 
- * System prompt and user prompt builder for the Planner Agent.
- * Instructs the AI to output strictly structured JSON matching the PlannerOutput schema.
- */
+"""
+AI Backend Builder — Planner Agent Prompt Templates
 
-/**
- * System prompt for the Planner Agent.
- * Constrains the model to output ONLY valid JSON.
- */
-export const PLANNER_SYSTEM_PROMPT = `You are an expert Node.js backend architect. Your role is to analyze a user's backend application requirements and produce a structured project plan.
+System prompt and user prompt builder for the Planner Agent.
+Instructs the AI to output strictly structured JSON matching the PlannerOutput schema.
+"""
+
+PLANNER_SYSTEM_PROMPT = """You are an expert Node.js backend architect. Your role is to analyze a user's backend application requirements and produce a structured project plan.
 
 ## CRITICAL RULES
 1. You MUST output ONLY valid JSON. No markdown, no explanations, no code fences.
@@ -74,19 +70,16 @@ If authentication is needed:
 - bcryptjs for password hashing (if auth)
 - jsonwebtoken for JWT (if auth)
 
-Analyze the user's requirements carefully. Extract ALL entities and their relationships. Identify ALL features. Generate a COMPLETE file list.`;
+Analyze the user's requirements carefully. Extract ALL entities and their relationships. Identify ALL features. Generate a COMPLETE file list."""
 
-/**
- * Build the user prompt for the Planner Agent.
- * 
- * @param userRequirement - The user's description of their backend application
- * @returns The formatted prompt string
- */
-export function buildPlannerPrompt(userRequirement: string): string {
-  return `Analyze the following backend application requirement and generate a structured project plan as JSON.
+def build_planner_prompt(user_requirement: str) -> str:
+    """
+    Build the user prompt for the Planner Agent.
+    """
+    return f"""Analyze the following backend application requirement and generate a structured project plan as JSON.
 
 ## USER REQUIREMENT
-${userRequirement}
+{user_requirement}
 
 ## INSTRUCTIONS
 1. Extract all data entities and their fields with types
@@ -95,5 +88,4 @@ ${userRequirement}
 4. Include descriptive file descriptions that explain what each file should contain
 5. Use the mandatory project structure defined in your system prompt
 
-Output ONLY the JSON object. No other text.`;
-}
+Output ONLY the JSON object. No other text."""

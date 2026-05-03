@@ -6,12 +6,10 @@
  */
 
 import * as vscode from 'vscode';
-import { OrchestratorAgent } from './agents/orchestrator-agent.js';
-import { AIClient } from './services/ai-client.js';
-import { Memory } from './state/memory.js';
 import { Logger } from './utils/logger.js';
 import { COMMANDS } from './utils/constants.js';
 import type { ExtensionConfig } from './types/index.js';
+
 
 let logger: Logger;
 
@@ -88,36 +86,8 @@ async function handleBuildBackend(): Promise<void> {
 
   logger.info(`User prompt: "${userPrompt}"`);
 
-  // ─── Step 3: Check AI availability ───────────────────────────────
-  const aiClientConfig = AIClient.configFromSettings();
-  const aiClient = new AIClient(aiClientConfig, logger);
-
-  // Check Flask API health
-  const flaskHealthy = await aiClient.checkFlaskHealth();
-  if (!flaskHealthy) {
-    const hasOpenAIKey = !!aiClientConfig.openaiApiKey;
-    if (!hasOpenAIKey) {
-      const action = await vscode.window.showWarningMessage(
-        'AI Backend Builder: Local Flask API is unreachable and no OpenAI API key is configured.',
-        'Open Settings',
-        'Cancel'
-      );
-      if (action === 'Open Settings') {
-        vscode.commands.executeCommand(
-          'workbench.action.openSettings',
-          'aiBackendBuilder'
-        );
-      }
-      return;
-    }
-    logger.warn('Flask API unreachable — will use OpenAI fallback');
-  } else {
-    logger.info('Flask API health check: OK');
-  }
-
-  // ─── Step 4: Run the pipeline with progress ─────────────────────
+  // ─── Step 3: Run the pipeline with progress ─────────────────────
   const config = loadExtensionConfig();
-  const memory = new Memory(logger);
 
   await vscode.window.withProgress(
     {
@@ -126,31 +96,68 @@ async function handleBuildBackend(): Promise<void> {
       cancellable: true,
     },
     async (progress, token) => {
-      // Wire up progress reporting
       const reportProgress = (message: string, increment?: number) => {
         progress.report({ message, increment });
       };
 
-      // Check for cancellation
+      const controller = new AbortController();
       token.onCancellationRequested(() => {
         logger.warn('Build cancelled by user');
+        controller.abort();
         vscode.window.showWarningMessage('AI Backend Builder: Build cancelled.');
       });
 
       try {
-        // Create and run the orchestrator
-        const orchestrator = new OrchestratorAgent(
-          config,
-          aiClient,
-          memory,
-          logger
-        );
-
-        const result = await orchestrator.execute({
-          userPrompt,
-          workspaceUri,
-          progress: reportProgress,
+        const response = await fetch(`${config.flaskUrl}/api/build`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: userPrompt,
+            workspace_uri: workspaceUri.fsPath
+          }),
+          signal: controller.signal
         });
+
+        if (!response.ok) {
+          throw new Error(`Flask API error: ${response.statusText}`);
+        }
+
+        // Parse SSE stream
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error("Failed to read response stream");
+
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let result: any = null;
+        let lastProgress = 0;
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\\n\\n');
+          buffer = lines.pop() || '';
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const data = JSON.parse(line.slice(6));
+                
+                if (data.type === 'status') {
+                  const inc = data.data.progress - lastProgress;
+                  lastProgress = data.data.progress;
+                  reportProgress(data.data.message, inc > 0 ? inc : 0);
+                  logger.info(`Status: ${data.data.message}`);
+                } else if (data.type === 'complete') {
+                  result = data.data;
+                }
+              } catch (e) {
+                logger.warn(`Failed to parse SSE line: ${line}`);
+              }
+            }
+          }
+        }
 
         // ─── Step 5: Show result ─────────────────────────────────
         if (result.success) {
