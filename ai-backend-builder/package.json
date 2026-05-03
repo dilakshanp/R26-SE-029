@@ -35,7 +35,7 @@
         "aiBackendBuilder.flaskUrl": {
           "type": "string",
           "default": "http://localhost:5000",
-          "description": "Base URL for the local Flask AI API proxy"
+          "description": "Base URL for the  Flask AI API proxy"
         },
         "aiBackendBuilder.openaiApiKey": {
           "type": "string",
